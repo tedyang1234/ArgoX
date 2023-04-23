@@ -5,8 +5,8 @@ VERSION=1.0
 
 # 各变量默认值
 CDN='https://ghproxy.com'
-SERVER_DEFAULT='icook.hk'
-UUID_DEFAULT='ffffffff-ffff-ffff-ffff-ffffffffffff'
+SERVER_DEFAULT='cdn.anycast.eu.org'
+UUID_DEFAULT='cba0f64a-e186-11ed-a330-bbc15146dbf5'
 WS_PATH_DEFAULT='argox'
 WORK_DIR='/etc/argox'
 TEMP_DIR='/tmp/argox'
