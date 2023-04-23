@@ -51,6 +51,7 @@
 
 ```
 bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/argox/main/argox.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/tedyang1234/ArgoX/main/argox.sh)
 ```
 
   | Option 参数 | Remark 备注 | 
