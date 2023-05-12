@@ -5,10 +5,11 @@ VERSION=1.0
 
 # 各变量默认值
 CDN='https://ghproxy.com'
-SERVER_DEFAULT='cdn.anycast.eu.org'
-UUID_DEFAULT='cba0f64a-e186-11ed-a330-bbc15146dbf5'
+SERVER_DEFAULT='icook.hk'
+UUID_DEFAULT='ffffffff-ffff-ffff-ffff-ffffffffffff'
 WS_PATH_DEFAULT='argox'
 WORK_DIR='/etc/argox'
+CLOUDFLARED_PORT='54321'
 TEMP_DIR='/tmp/argox'
 IP_API=https://api.ip.sb/geoip; ISP=isp
 #IP_API=http://ifconfig.co/json; ISP=asn_org
@@ -108,11 +109,13 @@ C[43]="\$APP 本地版本: \$LOCAL.\\\t 最新版本: \$ONLINE"
 E[44]="No upgrade required."
 C[44]="不需要升级"
 E[45]="Argo authentication message does not match the rules, neither Token nor Json, script exits. Feedback:[https://github.com/fscarmen/argox/issues]"
-C[45]="Argo 认证信息不符合规则，既不是 Token,也是不是 Json,脚本退出,问题反馈:[https://github.com/fscarmen/argox/issues]"
+C[45]="Argo 认证信息不符合规则，既不是 Token，也是不是 Json，脚本退出，问题反馈:[https://github.com/fscarmen/argox/issues]"
 E[46]="Connect"
 C[46]="连接"
 E[47]="The script must be run as root, you can enter sudo -i and then download and run again. Feedback:[https://github.com/fscarmen/argox/issues]"
 C[47]="必须以root方式运行脚本，可以输入 sudo -i 后重新下载运行，问题反馈:[https://github.com/fscarmen/argox/issues]"
+E[48]="Downloading the latest version \$APP failed, script exits. Feedback:[https://github.com/fscarmen/argox/issues]"
+C[48]="下载最新版本 \$APP 失败，脚本退出，问题反馈:[https://github.com/fscarmen/argox/issues]"
 
 # 自定义字体彩色，read 函数，友道翻译函数
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }  # 红色
@@ -215,10 +218,12 @@ argo_variable() {
 
   if [ -n "$ARGO_DOMAIN" ]; then
     [ -z "$ARGO_AUTH" ] && reading "\n $(text 11) " ARGO_AUTH
-    if [[ $ARGO_AUTH =~ TunnelSecret ]]; then
+    if [[ "$ARGO_AUTH" =~ TunnelSecret ]]; then
       ARGO_JSON=$ARGO_AUTH
-    elif [[ $ARGO_AUTH =~ ^[A-Z0-9a-z=]{120,250}$ ]]; then
+    elif [[ "$ARGO_AUTH" =~ ^[A-Z0-9a-z=]{120,250}$ ]]; then
       ARGO_TOKEN=$ARGO_AUTH
+    elif grep -qoP ".*cloudflared.*service install [A-Z0-9a-z=]{120,250}$" <<< "$ARGO_AUTH"; then
+      ARGO_TOKEN=$(awk -F ' ' '{print $NF}' <<< "$ARGO_AUTH")
     else
       error "\n $(text 45) \n"
     fi
@@ -249,16 +254,31 @@ xray_variable() {
 
 check_dependencies() {
   # 检测 Linux 系统的依赖，升级库并重新安装依赖
-  DEPS_CHECK=("ping" "wget" "systemctl" "ip" "unzip")
-  DEPS_INSTALL=(" iputils-ping" " wget" " systemctl" " iproute2" " unzip")
-  for ((g=0; g<${#DEPS_CHECK[@]}; g++)); do [ ! $(type -p ${DEPS_CHECK[g]}) ] && [[ ! "$DEPS" =~ "${DEPS_INSTALL[g]}" ]] && DEPS+=${DEPS_INSTALL[g]}; done
-  if [ -n "$DEPS" ]; then
-    info "\n $(text 7) $DEPS \n"
+  DEPS_CHECK=("ping" "wget" "systemctl" "ip" "unzip" "bash")
+  DEPS_INSTALL=("iputils-ping" "wget" "systemctl" "iproute2" "unzip" "bash")
+  for ((g=0; g<${#DEPS_CHECK[@]}; g++)); do [ ! $(type -p ${DEPS_CHECK[g]}) ] && [[ ! "${DEPS[@]}" =~ "${DEPS_INSTALL[g]}" ]] && DEPS+=(${DEPS_INSTALL[g]}); done
+  if [ "${#DEPS[@]}" -ge 1 ]; then
+    info "\n $(text 7) ${DEPS[@]} \n"
     ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
-    ${PACKAGE_INSTALL[int]} $DEPS >/dev/null 2>&1
+    ${PACKAGE_INSTALL[int]} ${DEPS[@]} >/dev/null 2>&1
   else
     info "\n $(text 8) \n"
   fi
+}
+
+# Json 生成两个配置文件
+json_argo() {
+  [ ! -e $WORK_DIR/tunnel.json ] && echo $ARGO_JSON > $WORK_DIR/tunnel.json
+  [ ! -e $WORK_DIR/tunnel.yml ] && cat > $WORK_DIR/tunnel.yml << EOF
+tunnel: $(cut -d\" -f12 <<< $ARGO_JSON)
+credentials-file: $WORK_DIR/tunnel.json
+protocol: h2mux
+
+ingress:
+  - hostname: ${ARGO_DOMAIN}
+    service: http://localhost:8080
+  - service: http_status:404
+EOF
 }
 
 install_argox() {
@@ -268,15 +288,14 @@ install_argox() {
   mkdir -p $WORK_DIR && echo "$L" > $WORK_DIR/language
   [ -e "$VARIABLE_FILE" ] && cp $VARIABLE_FILE $WORK_DIR/
   # Argo 生成守护进程文件
-  [ ! -e $WORK_DIR/cloudflared ] && { mv $TEMP_DIR/cloudflared $WORK_DIR; }
+  [ ! -e $WORK_DIR/cloudflared ] && wait && { mv $TEMP_DIR/cloudflared $WORK_DIR; }
   if [[ -n "${ARGO_JSON}" && -n "${ARGO_DOMAIN}" ]]; then
-    ARGO_RUNS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --config $WORK_DIR/tunnel.yml --url http://localhost:8080 run"
-    [ ! -e $WORK_DIR/tunnel.json ] && echo $ARGO_JSON > $WORK_DIR/tunnel.json
-    [ ! -e $WORK_DIR/tunnel.yml ] && echo -e "tunnel: $(cut -d\" -f12 <<< $ARGO_JSON)\ncredentials-file: $WORK_DIR/tunnel.json" > $WORK_DIR/tunnel.yml
+    ARGO_RUNS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --config $WORK_DIR/tunnel.yml run"
+    json_argo
   elif [[ -n "${ARGO_TOKEN}" && -n "${ARGO_DOMAIN}" ]]; then
-    ARGO_RUNS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto run --token ${ARGO_TOKEN}"
+    ARGO_RUNS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --protocol h2mux run --token ${ARGO_TOKEN}"
   else
-    ARGO_RUNS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --no-autoupdate --url http://localhost:8080"
+    ARGO_RUNS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --no-autoupdate --protocol h2mux --metrics localhost:$CLOUDFLARED_PORT --url http://localhost:8080"
   fi
 
   cat > /etc/systemd/system/argo.service << EOF
@@ -297,7 +316,7 @@ WantedBy=multi-user.target
 EOF
 
   # 生成配置文件及守护进程文件
-  [ ! -e $WORK_DIR/xray ] && { mv $TEMP_DIR/{xray,geo*.dat} $WORK_DIR; }
+  [ ! -e $WORK_DIR/xray ] && wait && { mv $TEMP_DIR/{xray,geo*.dat} $WORK_DIR; }
   cat > $WORK_DIR/config.json << EOF
 {
     "log":{
@@ -382,7 +401,7 @@ EOF
                 }
             },
             "sniffing":{
-                "enabled":true,
+                "enabled":false,
                 "destOverride":[
                     "http",
                     "tls"
@@ -409,7 +428,7 @@ EOF
                 }
             },
             "sniffing":{
-                "enabled":true,
+                "enabled":false,
                 "destOverride":[
                     "http",
                     "tls"
@@ -436,7 +455,7 @@ EOF
                 }
             },
             "sniffing":{
-                "enabled":true,
+                "enabled":false,
                 "destOverride":[
                     "http",
                     "tls"
@@ -464,7 +483,7 @@ EOF
                 }
             },
             "sniffing":{
-                "enabled":true,
+                "enabled":false,
                 "destOverride":[
                     "http",
                     "tls"
@@ -514,7 +533,7 @@ export_list() {
   check_install
 
   if grep -q "^ExecStart.*8080$" /etc/systemd/system/argo.service; then
-    sleep 5 && local LOCALHOST=$(ss -nltp | grep '"cloudflared"' | awk '{print $4}') && ARGO_DOMAIN=$(wget -qO- http://$LOCALHOST/quicktunnel | cut -d\" -f4)
+    sleep 5 && ARGO_DOMAIN=$(wget -qO- http://localhost:$CLOUDFLARED_PORT/quicktunnel | cut -d\" -f4)
   else
     ARGO_DOMAIN=${ARGO_DOMAIN:-"$(grep '^vless' $WORK_DIR/list | head -n 1 | sed "s@.*host=\(.*\)&.*@\1@g")"}
   fi
@@ -568,7 +587,7 @@ change_argo() {
   case $(grep "ExecStart" /etc/systemd/system/argo.service) in 
     *--config* ) ARGO_TYPE='Json'; ARGO_DOMAIN="$(grep '^vless' $WORK_DIR/list | head -n 1 | sed "s@.*host=\(.*\)&.*@\1@g")" ;;
     *--token* ) ARGO_TYPE='Token'; ARGO_DOMAIN="$(grep '^vless' $WORK_DIR/list | head -n 1 | sed "s@.*host=\(.*\)&.*@\1@g")" ;;
-    * ) ARGO_TYPE='Try'; local LOCALHOST=$(ss -nltp | grep '"cloudflared"' | awk '{print $4}') && ARGO_DOMAIN=$(wget -qO- http://$LOCALHOST/quicktunnel | cut -d\" -f4) ;;
+    * ) ARGO_TYPE='Try'; ARGO_DOMAIN=$(wget -qO- http://localhost:$CLOUDFLARED_PORT/quicktunnel | cut -d\" -f4) ;;
   esac
 
   hint "\n $(text_eval 40) \n"
@@ -576,18 +595,19 @@ change_argo() {
   hint " $(text 41) \n" && reading " $(text 24) " CHANGE_TO
     case "$CHANGE_TO" in
       1 ) systemctl disable --now argo
-          sed -i "s@ExecStart.*@ExecStart=$WORK_DIR/cloudflared tunnel --edge-ip-version auto --no-autoupdate --url http://localhost:8080@g" /etc/systemd/system/argo.service
+          [ -e $WORK_DIR/tunnel.json ] && rm -f $WORK_DIR/tunnel.{json,yml}
+          sed -i "s@ExecStart.*@ExecStart=$WORK_DIR/cloudflared tunnel --edge-ip-version auto --protocol h2mux --no-autoupdate --metrics localhost:$CLOUDFLARED_PORT --url http://localhost:8080@g" /etc/systemd/system/argo.service
           systemctl enable --now argo
           ;;
       2 ) argo_variable
           systemctl disable --now argo
           if [ -n "$ARGO_TOKEN" ]; then
-            sed -i "s@ExecStart.*@ExecStart=$WORK_DIR/cloudflared tunnel --edge-ip-version auto run --token ${ARGO_TOKEN}@g" /etc/systemd/system/argo.service
+            [ -e $WORK_DIR/tunnel.json ] && rm -f $WORK_DIR/tunnel.{json,yml}
+            sed -i "s@ExecStart.*@ExecStart=$WORK_DIR/cloudflared tunnel --edge-ip-version auto --protocol h2mux run --token ${ARGO_TOKEN}@g" /etc/systemd/system/argo.service
           elif [ -n "$ARGO_JSON" ]; then
-            rm -f $WORK_DIR/tunnel.{json,yml}
-            [ ! -e $WORK_DIR/tunnel.json ] && echo $ARGO_JSON > $WORK_DIR/tunnel.json
-            [ ! -e $WORK_DIR/tunnel.yml ] && echo -e "tunnel: $(cut -d\" -f12 <<< $ARGO_JSON)\ncredentials-file: $WORK_DIR/tunnel.json" > $WORK_DIR/tunnel.yml
-            sed -i "s@ExecStart.*@ExecStart=$WORK_DIR/cloudflared tunnel --edge-ip-version auto --config $WORK_DIR/tunnel.yml --url http://localhost:8080 run@g" /etc/systemd/system/argo.service
+            [ -e $WORK_DIR/tunnel.json ] && rm -f $WORK_DIR/tunnel.{json,yml}
+            json_argo            
+            sed -i "s@ExecStart.*@ExecStart=$WORK_DIR/cloudflared tunnel --edge-ip-version auto --config $WORK_DIR/tunnel.yml run@g" /etc/systemd/system/argo.service
           fi
           systemctl enable --now argo
           ;;
@@ -614,23 +634,32 @@ version() {
   local ONLINE=$(wget -qO- "https://api.github.com/repos/cloudflare/cloudflared/releases/latest" | grep "tag_name" | cut -d \" -f4)
   local LOCAL=$($WORK_DIR/cloudflared -v | grep -oP "version \K\S+")
   local APP=ARGO && info "\n $(text_eval 43) "
-  [[ "$ONLINE" != "$LOCAL" ]] && reading "\n $(text 9) " UPDATE[0] || info " $(text 44) "
+  [[ -n "$ONLINE" && "$ONLINE" != "$LOCAL" ]] && reading "\n $(text 9) " UPDATE[0] || info " $(text 44) "
   local ONLINE=$(wget -qO- "https://api.github.com/repos/XTLS/Xray-core/releases/latest" | grep "tag_name" | sed "s@.*\"v\(.*\)\",@\1@g")
   local LOCAL=$($WORK_DIR/xray version | grep -oP "Xray \K\S+")
   local APP=Xray && info "\n $(text_eval 43) "
-  [[ "$ONLINE" != "$LOCAL" ]] && reading "\n $(text 9) " UPDATE[1] || info " $(text 44) "
+  [[ -n "$ONLINE" && "$ONLINE" != "$LOCAL" ]] && reading "\n $(text 9) " UPDATE[1] || info " $(text 44) "
 
   [[ ${UPDATE[*]} =~ [Yy] ]] && check_system_info
   if [[ ${UPDATE[0]} = [Yy] ]]; then
-    systemctl disable --now argo
-    wget -qO $WORK_DIR/cloudflared $CDN/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARCHITECTURE && chmod +x $WORK_DIR/cloudflared && rm -f $WORK_DIR/cloudflared*.zip
-    systemctl enable --now argo && [ $(systemctl is-active argo) = 'active' ] && info " Argo $(text 28) $(text 37)" || error " Argo $(text 28) $(text 38) "
+    wget -O $TEMP_DIR/cloudflared $CDN/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH
+    if [ -s $TEMP_DIR/cloudflared ]; then
+      systemctl disable --now argo
+      chmod +x $TEMP_DIR/cloudflared && mv $TEMP_DIR/cloudflared $WORK_DIR/cloudflared
+      systemctl enable --now argo && [ $(systemctl is-active argo) = 'active' ] && info " Argo $(text 28) $(text 37)" || error " Argo $(text 28) $(text 38) "
+    else
+      local APP=ARGO && error "\n $(text_eval 48) "
+    fi
   fi
   if [[ ${UPDATE[1]} = [Yy] ]]; then
-    systemctl disable --now xray
-    wget -qO $WORK_DIR/Xray-linux-${ARCHITECTURE//amd/}.zip $CDN/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCHITECTURE//amd/}.zip
-    unzip -qo $WORK_DIR/Xray-linux-${ARCHITECTURE//amd/}.zip xray *.dat -d $WORK_DIR; rm -f $WORK_DIR/Xray*.zip
-    systemctl enable --now xray && [ $(systemctl is-active xray) = 'active' ] && info " Xray $(text 28) $(text 37)" || error " Xray $(text 28) $(text 38) "
+    wget -O $TEMP_DIR/Xray-linux-$XRAY_ARCH.zip $CDN/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$XRAY_ARCH.zip
+    if [ -s $TEMP_DIR/Xray-linux-$XRAY_ARCH.zip ]; then
+      systemctl disable --now xray
+      unzip -qo $TEMP_DIR/Xray-linux-$XRAY_ARCH.zip xray *.dat -d $WORK_DIR; rm -f $TEMP_DIR/Xray*.zip
+      systemctl enable --now xray && [ $(systemctl is-active xray) = 'active' ] && info " Xray $(text 28) $(text 37)" || error " Xray $(text 28) $(text 38) "
+    else
+      local APP=Xray && error "\n $(text_eval 48) "
+    fi
   fi
 }
 
@@ -642,8 +671,7 @@ menu_setting() {
   if [[ ${STATUS[*]} =~ $(text 27)|$(text 28) ]]; then
     if [ -e $WORK_DIR/cloudflared ]; then
       ARGO_VERSION=$($WORK_DIR/cloudflared -v | awk '{print $3}' | sed "s@^@Version: &@g")
-      local LOCALHOST=$(ss -nltp | grep '"cloudflared"' | awk '{print $4}')
-      [ -n "$LOCALHOST" ] && ARGO_CHECKHEALTH="$(text 46): $(wget -qO- http://$LOCALHOST/healthcheck | sed "s/OK/$(text 37)/")"
+      ss -nltp | grep -q "127\.0\.0\.1:$CLOUDFLARED_PORT.*cloudflared" && ARGO_CHECKHEALTH="$(text 46): $(wget -qO- http://localhost:$CLOUDFLARED_PORT/healthcheck | sed "s/OK/$(text 37)/")"
     fi
     [ -e $WORK_DIR/xray ] && XRAY_VERSION=$($WORK_DIR/xray version | awk 'NR==1 {print $2}' | sed "s@^@Version: &@g")
     OPTION[1]="1.  $(text 29)"
