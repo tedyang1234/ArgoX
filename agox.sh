@@ -5,9 +5,9 @@ VERSION=1.0
 
 # 各变量默认值
 CDN='https://ghproxy.com'
-SERVER_DEFAULT='icook.hk'
+SERVER_DEFAULT='nrt.chigua.tk'
 UUID_DEFAULT='ffffffff-ffff-ffff-ffff-ffffffffffff'
-WS_PATH_DEFAULT='argox'
+WS_PATH_DEFAULT='ago'
 WORK_DIR='/etc/argox'
 CLOUDFLARED_PORT='54321'
 TEMP_DIR='/tmp/argox'
